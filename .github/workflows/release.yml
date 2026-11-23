@@ -1,0 +1,88 @@
+name: Instalador
+
+# Gera o Setup.exe num runner limpo do GitHub (nada da maquina de quem desenvolve entra no binario).
+#  - Ao criar uma tag "vX.Y.Z": compila, gera o instalador e publica um Release com ele anexado.
+#  - Manualmente (Actions > Instalador > Run workflow): so compila e guarda o instalador como
+#    artefato, sem publicar nada. Bom para testar.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write # necessario para criar o Release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Conferir a versao
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          if (-not $v) { throw 'Nao achei a versao no Cargo.toml.' }
+          "VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$v") {
+            throw "A tag ($env:GITHUB_REF_NAME) nao bate com a versao do Cargo.toml (v$v)."
+          }
+
+      - name: Rust estavel atualizado
+        shell: pwsh
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Instalar o Inno Setup (se faltar)
+        shell: pwsh
+        run: |
+          $found = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ }
+          if (-not $found) { choco install innosetup --yes --no-progress }
+          $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw 'Inno Setup nao foi encontrado.' }
+          "ISCC: $iscc"
+
+      # Mesmo script que se usa localmente: compila, reescreve caminhos, confere que nao ha dados
+      # da maquina nos executaveis e monta o instalador.
+      - name: Compilar e gerar o instalador
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File installer\build.ps1
+
+      - name: Calcular SHA-256
+        shell: pwsh
+        run: |
+          $f = Get-Item "installer\Output\YTMusic-Setup-$env:VERSION.exe"
+          $hash = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower()
+          "SETUP_FILE=$($f.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SETUP_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "{0}  {1:N1} MB  sha256={2}" -f $f.Name, ($f.Length / 1MB), $hash
+
+      - name: Guardar o instalador (artefato)
+        uses: actions/upload-artifact@v4
+        with:
+          name: YTMusic-Setup-${{ env.VERSION }}
+          path: installer/Output/YTMusic-Setup-${{ env.VERSION }}.exe
+          if-no-files-found: error
+
+      - name: Publicar o Release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $notes = @(
+            "Instalador do YT Music $env:VERSION para Windows 10/11.",
+            "",
+            "- Instala por usuario (nao precisa de administrador) e oferece instalar o yt-dlp e o Deno pelo winget.",
+            "- O instalador nao e assinado digitalmente: o Windows SmartScreen pode mostrar *Editor desconhecido*. ",
+            "  Confira o hash antes de executar.",
+            "",
+            "SHA-256: ``$env:SETUP_SHA256``"
+          ) -join "`n"
+          gh release create $env:GITHUB_REF_NAME $env:SETUP_FILE --verify-tag --title "YT Music $env:VERSION" --notes $notes
