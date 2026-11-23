@@ -21,12 +21,21 @@ fn main() -> eframe::Result {
         return Ok(());
     }
 
-    let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("YT Music")
-            .with_inner_size([1000.0, 680.0])
-            .with_min_inner_size([360.0, 520.0]),
-        ..Default::default()
-    };
+    let mut viewport = eframe::egui::ViewportBuilder::default()
+        .with_title("YT Music")
+        .with_inner_size([1000.0, 680.0])
+        .with_min_inner_size([360.0, 520.0]);
+    if let Some(icon) = app_icon() {
+        viewport = viewport.with_icon(icon);
+    }
+    let options = eframe::NativeOptions { viewport, ..Default::default() };
     eframe::run_native("YT Music", options, Box::new(|cc| Ok(Box::new(app::App::new(cc)))))
+}
+
+/// Icone da janela (barra de titulo, barra de tarefas e Alt+Tab). Sem isso o
+/// eframe usa o icone padrao do egui.
+fn app_icon() -> Option<eframe::egui::IconData> {
+    let img = image::load_from_memory(include_bytes!("../assets/icon.png")).ok()?.into_rgba8();
+    let (width, height) = img.dimensions();
+    Some(eframe::egui::IconData { rgba: img.into_raw(), width, height })
 }

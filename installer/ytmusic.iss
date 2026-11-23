@@ -23,6 +23,7 @@ DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 UninstallDisplayIcon={app}\{#AppExe}
+SetupIconFile=..\assets\icon.ico
 OutputDir=Output
 OutputBaseFilename=YTMusic-Setup-{#AppVersion}
 Compression=lzma2/ultra64
