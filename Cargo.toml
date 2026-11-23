@@ -1,0 +1,39 @@
+[package]
+name = "ytmusic"
+version = "0.1.0"
+edition = "2024"
+default-run = "ytmusic"
+description = "Leve player de YouTube Music para Windows, sem navegador"
+
+[[bin]]
+name = "ytmusic"
+path = "src/main.rs"
+
+# Janela de login (WebView2). Fica num exe separado para o app principal nao
+# carregar o webview no dia a dia.
+[[bin]]
+name = "ytmusic-login"
+path = "src/bin/login.rs"
+
+[dependencies]
+dirs = "7.0.0"
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts"] }
+egui_extras = { version = "0.37.0", features = ["image", "http"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+rodio = { version = "0.23.0", default-features = false, features = ["playback", "symphonia-aac", "symphonia-isomp4"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha1 = "0.11.0"
+ureq = { version = "3.5.2", features = ["json"] }
+wry = "0.55"
+tao = "0.35"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Memory"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
