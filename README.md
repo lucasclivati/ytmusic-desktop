@@ -68,6 +68,20 @@ Os dois executáveis (`ytmusic.exe` e `ytmusic-login.exe`) precisam ficar **na m
 
 > O perfil `release` usa `lto` completo e `opt-level = "z"` para gerar um executável pequeno. Por isso o build de release demora alguns minutos; para iterar, use `cargo run` (debug).
 
+### Gerar o instalador (`Setup.exe`)
+
+Requisitos: Rust (com as *Build Tools do Visual Studio* / MSVC) e o [Inno Setup 6](https://jrsoftware.org/isinfo.php) (`winget install JRSoftware.InnoSetup`).
+
+```powershell
+powershell -File installer\build.ps1
+```
+
+O script compila o release e gera `installer\Output\YTMusic-Setup-<versão>.exe`, que instala o app por usuário (sem precisar de administrador) e, se você quiser, instala o yt-dlp e o Deno pelo winget.
+
+**Privacidade do build:** o compilador costuma embutir no `.exe` caminhos da máquina que compilou (como `C:\Users\<você>\.cargo\...`). O script reescreve esses prefixos e, ao final, **aborta** se achar o usuário do Windows, a pasta do projeto ou o nome do computador dentro dos executáveis ou do instalador. Para uma distribuição pública, o ideal é gerar o instalador em um ambiente limpo (por exemplo, no CI do GitHub).
+
+> Antivírus podem bloquear o build ou o instalador resultante (falso positivo, comum em programas Rust e em instaladores sem assinatura digital).
+
 ## Conectando sua conta
 
 Clique no avatar (canto superior direito) e em **Conectar conta do YouTube**. Uma janela de login do Google se abre; entre normalmente, com senha, verificação em duas etapas ou passkey, e ela fecha sozinha.
