@@ -4844,6 +4844,7 @@ dependencies = [
  "eframe",
  "egui_extras",
  "image",
+ "raw-window-handle",
  "rodio",
  "serde",
  "serde_json",

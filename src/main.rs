@@ -3,6 +3,7 @@
 mod app;
 mod auth;
 mod player;
+mod taskbar;
 mod util;
 mod ytm;
 

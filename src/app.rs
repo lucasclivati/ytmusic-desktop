@@ -70,6 +70,18 @@ pub struct App {
     cookie_input: String,
     account_name: Option<String>,
     ytdlp_ok: bool,
+    #[cfg(windows)]
+    taskbar: Option<crate::taskbar::Taskbar>,
+}
+
+/// Registra os botoes de controle na miniatura da barra de tarefas (so Windows).
+#[cfg(windows)]
+fn init_taskbar(cc: &eframe::CreationContext<'_>) -> Option<crate::taskbar::Taskbar> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match cc.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(h) => crate::taskbar::Taskbar::new(h.hwnd.get(), cc.egui_ctx.clone()),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -113,9 +125,20 @@ impl App {
             cookie_input: String::new(),
             account_name: None,
             ytdlp_ok: find_ytdlp().is_some(),
+            #[cfg(windows)]
+            taskbar: init_taskbar(cc),
         };
         app.refresh_account();
         app
+    }
+
+    /// Play/pause: alterna se ja ha faixa tocando/pausada; senao comeca a fila.
+    fn toggle_playback(&mut self, st: &crate::player::PlayerState) {
+        if st.current.is_some() && matches!(st.status, Status::Playing | Status::Paused) {
+            self.player.toggle();
+        } else if !self.queue.is_empty() {
+            self.start_current();
+        }
     }
 
     // ------------------------------------------------------------ background
@@ -723,11 +746,7 @@ impl App {
         let playing = st.status == Status::Playing;
         let main_icon = if playing { Icon::Pause } else { Icon::Play };
         if icon_button(ui, main_icon, 52.0).clicked() {
-            if st.current.is_some() && matches!(st.status, Status::Playing | Status::Paused) {
-                self.player.toggle();
-            } else if !self.queue.is_empty() {
-                self.start_current();
-            }
+            self.toggle_playback(st);
         }
         if icon_button(ui, Icon::Next, 40.0).clicked() {
             self.next(ctx);
@@ -811,6 +830,19 @@ impl eframe::App for App {
                     self.start_current();
                 } else {
                     self.next(&ctx);
+                }
+            }
+        }
+        // Botoes da miniatura na barra de tarefas (anterior / play-pause / proxima).
+        #[cfg(windows)]
+        {
+            let playing = st.status == Status::Playing;
+            let actions = self.taskbar.as_mut().map(|tb| tb.poll(playing)).unwrap_or_default();
+            for action in actions {
+                match action {
+                    crate::taskbar::Action::Prev => self.prev(),
+                    crate::taskbar::Action::Toggle => self.toggle_playback(&st),
+                    crate::taskbar::Action::Next => self.next(&ctx),
                 }
             }
         }
