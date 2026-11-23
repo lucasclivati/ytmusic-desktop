@@ -235,6 +235,18 @@ fn which(name: &str) -> Option<PathBuf> {
     })
 }
 
+/// Procura `exe` na pasta de pacotes do winget (`<package_prefix>_*`). O PATH
+/// do processo pode estar desatualizado logo apos instalar, entao olhamos direto la.
+fn winget_package_exe(package_prefix: &str, exe: &str) -> Option<PathBuf> {
+    let packages = dirs::data_local_dir()?.join("Microsoft").join("WinGet").join("Packages");
+    std::fs::read_dir(packages)
+        .ok()?
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(package_prefix))
+        .map(|e| e.path().join(exe))
+        .find(|p| p.is_file())
+}
+
 pub fn find_ytdlp() -> Option<PathBuf> {
     let mut candidates = vec![util::data_dir().join("yt-dlp.exe")];
     if let Ok(exe) = std::env::current_exe() {
@@ -242,22 +254,19 @@ pub fn find_ytdlp() -> Option<PathBuf> {
             candidates.push(dir.join("yt-dlp.exe"));
         }
     }
-    // Instalacao do winget: o PATH do processo pode estar desatualizado logo
-    // apos instalar, entao procura direto na pasta de pacotes.
-    if let Some(local) = dirs::data_local_dir() {
-        let packages = local.join("Microsoft").join("WinGet").join("Packages");
-        if let Ok(rd) = std::fs::read_dir(packages) {
-            for entry in rd.flatten() {
-                if entry.file_name().to_string_lossy().starts_with("yt-dlp.yt-dlp_") {
-                    candidates.push(entry.path().join("yt-dlp.exe"));
-                }
-            }
-        }
-    }
+    candidates.extend(winget_package_exe("yt-dlp.yt-dlp_", "yt-dlp.exe"));
     if let Some(found) = candidates.into_iter().find(|p| p.is_file()) {
         return Some(found);
     }
     which("yt-dlp")
+}
+
+/// Argumento `--js-runtimes` para o yt-dlp: Deno (inclusive o do winget) ou Node.
+fn js_runtime_arg() -> Option<String> {
+    if let Some(p) = which("deno").or_else(|| winget_package_exe("DenoLand.Deno_", "deno.exe")) {
+        return Some(format!("deno:{}", p.display()));
+    }
+    which("node").map(|p| format!("node:{}", p.display()))
 }
 
 fn ensure_downloaded(id: &str) -> Result<PathBuf, String> {
@@ -277,11 +286,8 @@ fn ensure_downloaded(id: &str) -> Result<PathBuf, String> {
         .arg("-o")
         .arg(util::cache_dir().join("%(id)s.%(ext)s"));
     // Versoes recentes do yt-dlp precisam de um runtime JS para o YouTube.
-    for rt in ["deno", "node"] {
-        if which(rt).is_some() {
-            cmd.args(["--js-runtimes", rt]);
-            break;
-        }
+    if let Some(rt) = js_runtime_arg() {
+        cmd.args(["--js-runtimes", &rt]);
     }
     cmd.arg(format!("https://music.youtube.com/watch?v={id}"));
     hide_console(&mut cmd);
