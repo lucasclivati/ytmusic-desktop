@@ -30,6 +30,9 @@ pub struct PlayerState {
     pub volume: f32,
     /// A faixa acabou (ou falhou) e a UI deve avancar a fila. A UI zera.
     pub finished: bool,
+    /// O automix ja comecou a proxima faixa sozinho: a UI so avanca a fila, sem
+    /// mandar tocar de novo. A UI zera.
+    pub advanced: bool,
 }
 
 enum Cmd {
@@ -37,6 +40,10 @@ enum Cmd {
     Toggle,
     Seek(Duration),
     Volume(f32),
+    /// Duracao da mescla em segundos; 0 desliga o automix.
+    Crossfade(u32),
+    /// Faixa que a fila tocara depois desta (a UI mantem atualizada).
+    SetNext(Option<Track>),
     Ready { token: u64, path: PathBuf },
     Failed { token: u64, message: String },
 }
@@ -56,6 +63,7 @@ impl Player {
             duration: Duration::ZERO,
             volume: load_volume(),
             finished: false,
+            advanced: false,
         }));
         let (tx, rx) = channel();
         let (worker_state, worker_tx, worker_ctx) = (state.clone(), tx.clone(), ctx.clone());
@@ -87,6 +95,16 @@ impl Player {
         let _ = self.tx.send(Cmd::Volume(v.clamp(0.0, 1.0)));
     }
 
+    /// Liga o automix com a mescla de `secs` segundos; 0 desliga.
+    pub fn set_crossfade(&self, secs: u32) {
+        let _ = self.tx.send(Cmd::Crossfade(secs));
+    }
+
+    /// Informa qual faixa vem depois desta (para o automix poder comecar a mescla).
+    pub fn set_next(&self, track: Option<Track>) {
+        let _ = self.tx.send(Cmd::SetNext(track));
+    }
+
     /// Baixa a proxima faixa em segundo plano para a troca ser instantanea.
     pub fn prefetch(&self, video_id: &str) {
         let id = video_id.to_string();
@@ -98,15 +116,67 @@ impl Player {
     }
 }
 
+/// Mescla em andamento: a faixa que esta acabando (`out`) sai enquanto a que entrou
+/// (o `player` do worker) sobe. O dispositivo antigo fica aberto ate o fim da mescla.
+struct Fade {
+    out: rodio::Player,
+    _old_sink: Option<rodio::MixerDeviceSink>,
+    len: Duration,
+}
+
+/// Ganhos (entra, sai) em `progress` de 0 a 1. Potencia constante: entra^2 + sai^2 = 1,
+/// entao o volume percebido nao afunda nem estoura no meio da mescla.
+fn fade_gains(progress: f32) -> (f32, f32) {
+    let angle = progress.clamp(0.0, 1.0) * std::f32::consts::FRAC_PI_2;
+    (angle.sin(), angle.cos())
+}
+
+/// Faixa a mesclar agora, se for a hora: automix ligado, proxima conhecida e ja
+/// baixada, e o fim da atual dentro da janela. Devolve (arquivo, faixa, duracao da mescla).
+fn crossfade_due(
+    crossfade_secs: u32,
+    next: &Option<Track>,
+    player: &rodio::Player,
+    state: &Arc<Mutex<PlayerState>>,
+) -> Option<(PathBuf, Track, Duration)> {
+    let upcoming = next.as_ref().filter(|_| crossfade_secs > 0)?;
+    let (status, duration) = {
+        let s = state.lock().unwrap();
+        (s.status.clone(), s.duration)
+    };
+    let window = Duration::from_secs(crossfade_secs as u64);
+    let remaining = duration.saturating_sub(player.get_pos());
+    // Faixas curtas demais (menos de 3 janelas) nao mesclam; ao tocar o fim isso evita
+    // uma mescla maior que a propria musica.
+    let due = status == Status::Playing
+        && !player.is_paused()
+        && duration >= window * 3
+        && remaining >= Duration::from_secs(1)
+        && remaining <= window;
+    if !due {
+        return None;
+    }
+    let path = cached_file(&upcoming.video_id)?; // ainda nao baixou: troca normal
+    Some((path, upcoming.clone(), window.min(remaining)))
+}
+
 fn worker(rx: Receiver<Cmd>, tx: Sender<Cmd>, state: Arc<Mutex<PlayerState>>, ctx: eframe::egui::Context) {
     let mut sink: Option<rodio::MixerDeviceSink> = None;
     let mut player: Option<rodio::Player> = None;
     let mut token: u64 = 0;
+    let mut fade: Option<Fade> = None;
+    let mut crossfade_secs: u32 = 0;
+    let mut next: Option<Track> = None;
 
     loop {
-        match rx.recv_timeout(Duration::from_millis(150)) {
+        // Durante a mescla o volume e atualizado com mais frequencia (degraus menores).
+        let tick = Duration::from_millis(if fade.is_some() { 40 } else { 150 });
+        match rx.recv_timeout(tick) {
             Ok(Cmd::Play(track)) => {
                 token += 1;
+                if let Some(f) = fade.take() {
+                    f.out.stop();
+                }
                 if let Some(p) = player.take() {
                     p.stop();
                 }
@@ -128,12 +198,17 @@ fn worker(rx: Receiver<Cmd>, tx: Sender<Cmd>, state: Arc<Mutex<PlayerState>>, ct
                     ctx2.request_repaint();
                 });
             }
-            Ok(Cmd::Ready { token: t, path }) if t == token => {
-                match start(&path, &mut sink, &state) {
-                    Ok(p) => player = Some(p),
-                    Err(message) => fail(&state, message),
+            Ok(Cmd::Ready { token: t, path }) if t == token => match start(&path, &mut sink, &state, 1.0) {
+                Ok((p, total)) => {
+                    player = Some(p);
+                    let mut s = state.lock().unwrap();
+                    if let Some(t) = total {
+                        s.duration = t;
+                    }
+                    s.status = Status::Playing;
                 }
-            }
+                Err(message) => fail(&state, message),
+            },
             Ok(Cmd::Failed { token: t, message }) if t == token => fail(&state, message),
             Ok(Cmd::Ready { .. }) | Ok(Cmd::Failed { .. }) => {} // resposta de uma faixa antiga
             Ok(Cmd::Toggle) => {
@@ -141,15 +216,27 @@ fn worker(rx: Receiver<Cmd>, tx: Sender<Cmd>, state: Arc<Mutex<PlayerState>>, ct
                     let mut s = state.lock().unwrap();
                     if p.is_paused() {
                         p.play();
+                        if let Some(f) = &fade {
+                            f.out.play();
+                        }
                         s.status = Status::Playing;
                     } else {
                         p.pause();
+                        if let Some(f) = &fade {
+                            f.out.pause();
+                        }
                         s.status = Status::Paused;
                     }
                 }
             }
             Ok(Cmd::Seek(to)) => {
                 if let Some(p) = &player {
+                    // Mexer na barra cancela a mescla: a faixa nova assume o volume cheio.
+                    if let Some(f) = fade.take() {
+                        f.out.stop();
+                        let v = state.lock().unwrap().volume;
+                        p.set_volume(v * v);
+                    }
                     let _ = p.try_seek(to);
                 }
             }
@@ -160,8 +247,59 @@ fn worker(rx: Receiver<Cmd>, tx: Sender<Cmd>, state: Arc<Mutex<PlayerState>>, ct
                     p.set_volume(v * v);
                 }
             }
+            Ok(Cmd::Crossfade(secs)) => crossfade_secs = secs,
+            Ok(Cmd::SetNext(track)) => next = track,
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
+        }
+
+        // Mescla em andamento: segue as curvas de volume e encerra quando completar.
+        if let (Some(f), Some(p)) = (&fade, &player) {
+            let base = {
+                let v = state.lock().unwrap().volume;
+                v * v
+            };
+            let progress = p.get_pos().as_secs_f32() / f.len.as_secs_f32().max(0.001);
+            if progress >= 1.0 || f.out.empty() {
+                p.set_volume(base);
+                if let Some(f) = fade.take() {
+                    f.out.stop();
+                }
+            } else {
+                let (gain_in, gain_out) = fade_gains(progress);
+                p.set_volume(base * gain_in);
+                f.out.set_volume(base * gain_out);
+            }
+        }
+
+        // Fim da faixa perto e automix ligado: comeca a proxima por cima, em outro canal.
+        if fade.is_none() {
+            let due = player.as_ref().and_then(|p| crossfade_due(crossfade_secs, &next, p, &state));
+            if let Some((path, upcoming, len)) = due {
+                let old_sink = sink.take();
+                match start(&path, &mut sink, &state, 0.0) {
+                    Ok((incoming, total)) => {
+                        if let Some(out) = player.replace(incoming) {
+                            fade = Some(Fade { out, _old_sink: old_sink, len });
+                        }
+                        next = None; // a UI manda a seguinte depois de avancar a fila
+                        let mut s = state.lock().unwrap();
+                        s.duration = total.unwrap_or(Duration::from_secs(upcoming.duration_secs as u64));
+                        s.current = Some(upcoming);
+                        s.position = Duration::ZERO;
+                        s.status = Status::Playing;
+                        s.finished = false;
+                        s.advanced = true;
+                        drop(s);
+                        ctx.request_repaint();
+                    }
+                    // Nao deu para abrir a proxima: segue a faixa atual e troca normalmente no fim.
+                    Err(_) => {
+                        sink = old_sink;
+                        next = None;
+                    }
+                }
+            }
         }
 
         if let Some(p) = &player {
@@ -184,11 +322,14 @@ fn fail(state: &Arc<Mutex<PlayerState>>, message: String) {
     s.finished = true;
 }
 
+/// Abre o dispositivo e comeca a tocar `path` com ganho inicial `gain` (0 = mudo,
+/// para a mescla subir do zero sem estalo). Devolve o player e a duracao real, se conhecida.
 fn start(
     path: &Path,
     sink: &mut Option<rodio::MixerDeviceSink>,
     state: &Arc<Mutex<PlayerState>>,
-) -> Result<rodio::Player, String> {
+    gain: f32,
+) -> Result<(rodio::Player, Option<Duration>), String> {
     // Reabre o dispositivo a cada faixa: sobrevive a troca de fone/saida.
     let mut device = DeviceSinkBuilder::open_default_sink().map_err(|e| format!("audio: {e}"))?;
     device.log_on_drop(false);
@@ -197,15 +338,10 @@ fn start(
     let total = decoder.total_duration();
     let player = rodio::Player::connect_new(device.mixer());
     let volume = state.lock().unwrap().volume;
-    player.set_volume(volume * volume);
+    player.set_volume(volume * volume * gain);
     player.append(decoder);
     *sink = Some(device);
-    let mut s = state.lock().unwrap();
-    if let Some(t) = total {
-        s.duration = t;
-    }
-    s.status = Status::Playing;
-    Ok(player)
+    Ok((player, total))
 }
 
 // ------------------------------------------------------------------ yt-dlp
@@ -341,6 +477,70 @@ mod tests {
         println!("amostras em 2s: {secs}");
     }
 
+    /// Automix de ponta a ponta com o worker real e o dispositivo de audio: toca A,
+    /// pula para perto do fim e confere que B entra sozinho (flag `advanced`) e que
+    /// a mescla termina com B tocando normalmente. Usa volume baixo sem gravar o volume do usuario.
+    /// Precisa das duas faixas no cache. Rode com
+    /// `cargo test automix_crossfades -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn automix_crossfades() {
+        fn track(id: &str) -> Track {
+            let path = cached_file(id).unwrap_or_else(|| panic!("{id} nao esta no cache"));
+            let total = Decoder::try_from(std::fs::File::open(path).unwrap()).unwrap().total_duration().unwrap();
+            Track { video_id: id.into(), title: id.into(), duration_secs: total.as_secs() as u32, ..Default::default() }
+        }
+        let (a, b) = (track("Jb6gcoR266U"), track("dQw4w9WgXcQ"));
+        let a_len = Duration::from_secs(a.duration_secs as u64);
+
+        let player = Player::new(eframe::egui::Context::default());
+        player.state.lock().unwrap().volume = 0.05; // direto no estado: set_volume() gravaria no arquivo do usuario
+        player.play(a.clone());
+        let wait = |what: &str, secs: u64, cond: &dyn Fn(&PlayerState) -> bool| {
+            let start = std::time::Instant::now();
+            while !cond(&player.snapshot()) {
+                assert!(start.elapsed() < Duration::from_secs(secs), "tempo esgotado: {what}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            start.elapsed()
+        };
+        wait("A tocando", 20, &|s| s.status == Status::Playing);
+
+        player.set_crossfade(3);
+        player.set_next(Some(b.clone()));
+        player.seek(a_len - Duration::from_secs(7));
+        std::thread::sleep(Duration::from_secs(2));
+        let s = player.snapshot();
+        assert!(!s.advanced && s.current.as_ref().unwrap().video_id == a.video_id, "mesclou cedo demais");
+
+        let took = wait("B entrar sozinho", 15, &|s| s.advanced);
+        let s = player.snapshot();
+        println!("B entrou apos {took:?}; posicao de B {:?}, duracao {:?}", s.position, s.duration);
+        assert_eq!(s.current.as_ref().unwrap().video_id, b.video_id);
+        assert!(s.position < Duration::from_secs(2), "B deveria comecar do zero");
+        assert!(!s.finished, "nao pode contar como fim de faixa");
+
+        // Passada a mescla (3s) e o fim de A, B segue tocando e avancando.
+        std::thread::sleep(Duration::from_secs(5));
+        let s = player.snapshot();
+        println!("depois da mescla: {:?} em {:?}", s.status, s.position);
+        assert_eq!(s.status, Status::Playing);
+        assert!(!s.finished && s.position > Duration::from_secs(4), "B parou ou nao avancou");
+        assert_eq!(s.current.as_ref().unwrap().video_id, b.video_id);
+
+        // Desligado (0), nao mescla: so toca A ate o fim e marca `finished`.
+        player.state.lock().unwrap().advanced = false; // a UI zera a flag; aqui fazemos o mesmo
+        player.set_crossfade(0);
+        player.set_next(Some(a.clone()));
+        player.play(a.clone());
+        wait("A tocando de novo", 20, &|s| s.status == Status::Playing && s.current.as_ref().is_some_and(|t| t.video_id == a.video_id));
+        player.seek(a_len - Duration::from_secs(4));
+        std::thread::sleep(Duration::from_secs(1));
+        assert!(!player.snapshot().advanced, "mesclou com o automix desligado");
+        wait("fim de A", 15, &|s| s.finished);
+        assert!(!player.snapshot().advanced);
+    }
+
     /// Toca 3s no dispositivo de audio padrao e confere que a posicao avanca e
     /// que o seek funciona. Precisa de uma saida de audio.
     #[test]
@@ -379,4 +579,65 @@ fn load_volume() -> f32 {
 
 fn save_volume(v: f32) {
     let _ = std::fs::write(volume_file(), v.to_string());
+}
+
+// ------------------------------------------------------------------ automix
+
+/// Limites da duracao da mescla, em segundos.
+pub const AUTOMIX_MIN_SECS: u32 = 2;
+pub const AUTOMIX_MAX_SECS: u32 = 12;
+const AUTOMIX_DEFAULT_SECS: u32 = 6;
+
+fn automix_file() -> PathBuf {
+    util::data_dir().join("automix")
+}
+
+/// `(ligado, segundos)`. Sem arquivo (ou arquivo ilegivel) = desligado.
+fn parse_automix(text: &str) -> (bool, u32) {
+    let mut parts = text.split_whitespace();
+    let enabled = parts.next() == Some("on");
+    let secs = parts
+        .next()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(AUTOMIX_DEFAULT_SECS)
+        .clamp(AUTOMIX_MIN_SECS, AUTOMIX_MAX_SECS);
+    (enabled, secs)
+}
+
+pub fn load_automix() -> (bool, u32) {
+    parse_automix(&std::fs::read_to_string(automix_file()).unwrap_or_default())
+}
+
+pub fn save_automix(enabled: bool, secs: u32) {
+    let _ = std::fs::write(automix_file(), format!("{} {secs}", if enabled { "on" } else { "off" }));
+}
+
+#[cfg(test)]
+mod automix_tests {
+    use super::*;
+
+    #[test]
+    fn fade_keeps_constant_power_and_ends_at_the_right_levels() {
+        assert_eq!(fade_gains(0.0), (0.0, 1.0));
+        let (end_in, end_out) = fade_gains(1.0);
+        assert!((end_in - 1.0).abs() < 1e-6 && end_out.abs() < 1e-6);
+        for i in 0..=20 {
+            let (a, b) = fade_gains(i as f32 / 20.0);
+            assert!((a * a + b * b - 1.0).abs() < 1e-5, "potencia nao constante em {i}/20");
+        }
+        // Fora do intervalo nao passa de 0..1.
+        assert_eq!(fade_gains(-3.0), fade_gains(0.0));
+        assert_eq!(fade_gains(9.0), fade_gains(1.0));
+    }
+
+    #[test]
+    fn automix_is_off_by_default_and_settings_are_clamped() {
+        assert_eq!(parse_automix(""), (false, AUTOMIX_DEFAULT_SECS));
+        assert_eq!(parse_automix("lixo"), (false, AUTOMIX_DEFAULT_SECS));
+        assert_eq!(parse_automix("on 8"), (true, 8));
+        assert_eq!(parse_automix("off 4"), (false, 4));
+        assert_eq!(parse_automix("on 99"), (true, AUTOMIX_MAX_SECS));
+        assert_eq!(parse_automix("on 0"), (true, AUTOMIX_MIN_SECS));
+        assert_eq!(parse_automix("on"), (true, AUTOMIX_DEFAULT_SECS));
+    }
 }
