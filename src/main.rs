@@ -8,6 +8,7 @@ mod mini;
 mod player;
 mod prefs;
 mod taskbar;
+mod updater;
 mod util;
 mod ytm;
 

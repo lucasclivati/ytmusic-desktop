@@ -76,7 +76,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $notes = @(
+          # As novidades da versao ficam em release-notes/<versao>.md (o app as mostra ao atualizar).
+          $custom = ''
+          $notesFile = "release-notes/$env:VERSION.md"
+          if (Test-Path $notesFile) { $custom = (Get-Content $notesFile -Raw -Encoding utf8).Trim() + "`n`n" }
+          $notes = $custom + (@(
             "Instalador do YT Music $env:VERSION para Windows 10/11.",
             "",
             "- Instala por usuario (nao precisa de administrador) e oferece instalar o yt-dlp e o Deno pelo winget.",
@@ -84,5 +88,8 @@ jobs:
             "  Confira o hash antes de executar.",
             "",
             "SHA-256: ``$env:SETUP_SHA256``"
-          ) -join "`n"
-          gh release create $env:GITHUB_REF_NAME $env:SETUP_FILE --verify-tag --title "YT Music $env:VERSION" --notes $notes
+          ) -join "`n")
+          # Arquivo UTF-8 (sem BOM) em vez de argumento: preserva os acentos.
+          $notesPath = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+          [System.IO.File]::WriteAllText($notesPath, $notes, (New-Object System.Text.UTF8Encoding($false)))
+          gh release create $env:GITHUB_REF_NAME $env:SETUP_FILE --verify-tag --title "YT Music $env:VERSION" --notes-file $notesPath

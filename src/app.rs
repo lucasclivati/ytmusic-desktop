@@ -6,11 +6,15 @@ use crate::mini::{self, MiniAction};
 use crate::player::{Player, Status, find_ytdlp};
 use crate::prefs::Prefs;
 use crate::tr;
+use crate::updater;
 use crate::util::fmt_time;
 use crate::ytm::{Client, Playlist, Track, thumb_url};
 use eframe::egui::{self, Align, Align2, Color32, FontId, Layout, Margin, Pos2, Rect, RichText, Sense, Stroke, Vec2, pos2, vec2};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
+
+mod settings;
+mod update;
 
 const BG: Color32 = Color32::from_rgb(0x03, 0x03, 0x03);
 const PANEL: Color32 = Color32::from_rgb(0x21, 0x21, 0x21);
@@ -52,6 +56,10 @@ enum Msg {
     Login(Result<Auth, String>),
     Related(String, Result<Vec<Track>, String>),
     AddedToPlaylist(Playlist, Result<(), String>),
+    /// Resultado de "Verificar atualizacoes" (None = ja esta na versao mais recente).
+    UpdateChecked(Result<Option<updater::Release>, String>),
+    UpdateProgress(u64, u64),
+    UpdateDownloaded(Result<std::path::PathBuf, String>),
 }
 
 pub struct App {
@@ -73,6 +81,11 @@ pub struct App {
     qi: usize,
     mix_pending: bool,
     consecutive_errors: u8,
+    /// Automix (mescla o fim de uma faixa com o inicio da proxima). Desligado por padrao.
+    automix: bool,
+    automix_secs: u32,
+    /// Ultima "proxima faixa" informada ao player (so reenvia quando muda).
+    sent_next: Option<String>,
     last_title: String,
     seek_drag: Option<f32>,
 
@@ -82,8 +95,8 @@ pub struct App {
 
     notice: Option<String>,
     show_settings: bool,
-    /// Janela de configuracoes (engrenagem) aberta.
-    show_prefs: bool,
+    settings_page: settings::Page,
+    update_state: update::UpdateState,
     cookie_input: String,
     account_name: Option<String>,
     ytdlp_ok: bool,
@@ -133,6 +146,31 @@ fn main_hwnd(cc: &eframe::CreationContext<'_>) -> Option<isize> {
     }
 }
 
+/// Faixa que o automix pode mesclar depois de `queue[qi]`. Repetir faixa nunca mescla
+/// (seria a mesma musica sobre ela mesma), nem uma fila de uma faixa so.
+fn crossfade_target(queue: &[Track], qi: usize, repeat: Repeat) -> Option<&Track> {
+    if repeat == Repeat::One {
+        return None;
+    }
+    match queue.get(qi + 1) {
+        Some(t) => Some(t),
+        None if repeat == Repeat::All && queue.len() > 1 => queue.first(),
+        None => None,
+    }
+}
+
+/// Posicao na fila da faixa `id` que o automix acabou de comecar: a proxima ocorrencia
+/// depois de `qi` ou, passando do fim (repetir fila), a primeira.
+fn queue_index_of(queue: &[Track], qi: usize, id: &str) -> Option<usize> {
+    queue
+        .iter()
+        .enumerate()
+        .skip(qi + 1)
+        .find(|(_, t)| t.video_id == id)
+        .or_else(|| queue.iter().enumerate().find(|(_, t)| t.video_id == id))
+        .map(|(i, _)| i)
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Repeat {
     Off,
@@ -147,6 +185,7 @@ impl App {
         setup_style(&cc.egui_ctx);
         let (tx, rx) = channel();
         let client = Client::new(Auth::load());
+        let (automix, automix_secs) = crate::player::load_automix();
         let mut app = App {
             player: Player::new(cc.egui_ctx.clone()),
             client,
@@ -164,6 +203,9 @@ impl App {
             qi: 0,
             mix_pending: false,
             consecutive_errors: 0,
+            automix,
+            automix_secs,
+            sent_next: None,
             last_title: String::new(),
             seek_drag: None,
             repeat: Repeat::Off,
@@ -171,7 +213,8 @@ impl App {
             volume_before_mute: 0.5,
             notice: None,
             show_settings: false,
-            show_prefs: false,
+            settings_page: settings::Page::Account,
+            update_state: update::UpdateState::Idle,
             cookie_input: String::new(),
             account_name: None,
             ytdlp_ok: find_ytdlp().is_some(),
@@ -195,7 +238,42 @@ impl App {
         let lang = app.prefs.lang.as_deref().and_then(crate::i18n::Lang::from_code).unwrap_or_else(crate::i18n::Lang::system);
         crate::i18n::set_lang(lang);
         app.refresh_account();
+        app.apply_automix(false);
         app
+    }
+
+    /// Aplica (e, se `save`, grava) a configuracao do automix no player.
+    fn apply_automix(&self, save: bool) {
+        if save {
+            crate::player::save_automix(self.automix, self.automix_secs);
+        }
+        self.player.set_crossfade(if self.automix { self.automix_secs } else { 0 });
+    }
+
+    /// Faixa que a fila tocara depois da atual, se o automix puder mescla-la.
+    /// Repetir faixa nao mescla (seria a mesma musica sobre ela mesma).
+    fn crossfade_target(&self) -> Option<&Track> {
+        crossfade_target(&self.queue, self.qi, self.repeat)
+    }
+
+    /// Mantem o player sabendo qual e a proxima faixa; so envia quando muda.
+    fn sync_next_track(&mut self) {
+        let target = if self.automix { self.crossfade_target().cloned() } else { None };
+        let id = target.as_ref().map(|t| t.video_id.clone());
+        if id != self.sent_next {
+            self.player.set_next(target);
+            self.sent_next = id;
+        }
+    }
+
+    /// O automix ja esta tocando `current`: so acompanha a fila (nao toca de novo).
+    fn follow_crossfade(&mut self, current: &Track) {
+        if let Some(i) = queue_index_of(&self.queue, self.qi, &current.video_id) {
+            self.qi = i;
+        }
+        self.consecutive_errors = 0;
+        self.sent_next = None; // o player zerou a "proxima": manda a nova
+        self.prefetch_next();
     }
 
     /// Play/pause: alterna se ja ha faixa tocando/pausada; senao comeca a fila.
@@ -375,6 +453,9 @@ impl App {
                     }
                     Err(e) => self.notice = Some(e),
                 },
+                Msg::UpdateChecked(result) => self.update_checked(result),
+                Msg::UpdateProgress(done, total) => self.update_progress(done, total),
+                Msg::UpdateDownloaded(result) => self.update_downloaded(result),
             }
         }
     }
@@ -594,7 +675,7 @@ impl App {
     fn gear(&mut self, ui: &mut egui::Ui) {
         let (rect, resp) = ui.allocate_exact_size(Vec2::splat(34.0), Sense::click());
         let c = rect.center();
-        let hot = resp.hovered() || self.show_prefs;
+        let hot = resp.hovered() || (self.show_settings && self.settings_page != settings::Page::Account);
         if hot {
             ui.painter().circle_filled(c, 17.0, Color32::from_white_alpha(22));
         }
@@ -609,8 +690,7 @@ impl App {
         p.circle_stroke(c, 6.2, Stroke::new(2.4, color));
         p.circle_filled(c, 2.2, color);
         if resp.on_hover_text(tr!("settings.tooltip")).clicked() {
-            self.show_prefs = !self.show_prefs;
-            self.show_settings = false;
+            self.open_settings(settings::Page::Playback);
         }
     }
 
@@ -620,7 +700,7 @@ impl App {
         let c = rect.center();
         let fill = if logged { AVATAR } else { Color32::from_gray(70) };
         ui.painter().circle_filled(c, 17.0, fill);
-        if resp.hovered() || self.show_settings {
+        if resp.hovered() || (self.show_settings && self.settings_page == settings::Page::Account) {
             ui.painter().circle_stroke(c, 17.0, Stroke::new(2.0, Color32::from_white_alpha(90)));
         }
         let initial = self.account_name.as_deref().and_then(|n| n.chars().next()).map(|ch| ch.to_uppercase().to_string());
@@ -636,8 +716,7 @@ impl App {
             }
         }
         if resp.on_hover_text(tr!("account.tooltip")).clicked() {
-            self.show_settings = !self.show_settings;
-            self.show_prefs = false;
+            self.open_settings(settings::Page::Account);
         }
     }
 
@@ -721,135 +800,6 @@ impl App {
         if self.playlists.is_none() && !self.loading && self.client.is_logged_in() {
             self.loading = true;
             self.spawn(ctx, |c| Msg::Playlists(c.library_playlists()));
-        }
-    }
-
-    fn settings_window(&mut self, ctx: &egui::Context) {
-        if self.show_settings {
-            let mut open = true;
-            egui::Window::new(tr!("account.title"))
-                .id(egui::Id::unique("account_window"))
-                .open(&mut open)
-                .anchor(Align2::RIGHT_TOP, vec2(-12.0, 56.0))
-                .collapsible(false)
-                .resizable(false)
-                .default_width(320.0)
-                .show(ctx, |ui| self.account(ui));
-            if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-                self.show_settings = false;
-            }
-        }
-        if self.show_prefs {
-            let mut open = true;
-            egui::Window::new(tr!("settings.title"))
-                .id(egui::Id::unique("prefs_window"))
-                .open(&mut open)
-                .anchor(Align2::RIGHT_TOP, vec2(-56.0, 56.0))
-                .collapsible(false)
-                .resizable(false)
-                .default_width(340.0)
-                .show(ctx, |ui| self.preferences(ui));
-            if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-                self.show_prefs = false;
-            }
-        }
-    }
-
-    /// Janela da conta: so login, logout e cookie manual.
-    fn account(&mut self, ui: &mut egui::Ui) {
-        ui.set_width(300.0);
-        if self.client.is_logged_in() {
-            let who = self.account_name.clone().unwrap_or_else(|| tr!("account.connected_fallback").into());
-            ui.label(RichText::new(who).strong().size(16.0));
-            ui.label(RichText::new(tr!("account.connected_to")).color(DIM).small());
-            ui.add_space(6.0);
-            if ui.button(tr!("account.disconnect")).clicked() {
-                Auth::clear();
-                self.apply_auth(None);
-                self.notice = Some(tr!("account.disconnected").into());
-            }
-        } else {
-            ui.label(tr!("account.connect_prompt"));
-            ui.add_space(6.0);
-            if pill_button(ui, tr!("login.connect"), true).clicked() {
-                self.connect_account(&ui.ctx().clone());
-                self.show_settings = false;
-            }
-        }
-        ui.add_space(8.0);
-        ui.collapsing(tr!("account.cookie_import"), |ui| {
-            ui.label(RichText::new(tr!("account.cookie_help")).color(DIM).small());
-            ui.add(egui::TextEdit::multiline(&mut self.cookie_input).desired_rows(3).desired_width(f32::INFINITY));
-            if ui.button(tr!("account.cookie_import_button")).clicked() {
-                match Auth::from_cookie_header(&self.cookie_input) {
-                    Some(auth) => {
-                        let _ = auth.save();
-                        self.apply_auth(Some(auth));
-                        self.cookie_input.clear();
-                        self.notice = Some(tr!("account.cookie_imported").into());
-                        self.show_settings = false;
-                    }
-                    None => self.notice = Some(tr!("account.cookie_invalid").into()),
-                }
-            }
-        });
-    }
-
-    /// Janela de configuracoes (engrenagem): idioma, reproducao, interface e atalhos.
-    fn preferences(&mut self, ui: &mut egui::Ui) {
-        ui.set_width(320.0);
-        let mut changed = false;
-
-        section_label(ui, tr!("settings.language"));
-        let current = crate::i18n::lang();
-        egui::ComboBox::from_id_salt("lang")
-            .selected_text(current.native_name())
-            .width(220.0)
-            .show_ui(ui, |ui| {
-                for l in crate::i18n::Lang::ALL {
-                    if ui.selectable_label(l == current, l.native_name()).clicked() && l != current {
-                        crate::i18n::set_lang(l);
-                        self.prefs.lang = Some(l.code().to_string());
-                        changed = true;
-                    }
-                }
-            });
-
-        ui.add_space(10.0);
-        section_label(ui, tr!("settings.playback"));
-        changed |= ui.checkbox(&mut self.prefs.mini_compact, tr!("settings.mini_compact")).changed();
-        changed |= ui.checkbox(&mut self.prefs.mini_pinned, tr!("settings.mini_pinned")).changed();
-        if self.ytdlp_ok {
-            ui.label(RichText::new(format!("✔ {}", tr!("settings.ytdlp_ok"))).color(DIM).small());
-        } else {
-            ui.colored_label(ACCENT, tr!("settings.ytdlp_missing"));
-        }
-
-        ui.add_space(10.0);
-        section_label(ui, tr!("settings.interface"));
-        changed |= ui.checkbox(&mut self.prefs.show_queue, tr!("settings.show_queue")).changed();
-
-        ui.add_space(10.0);
-        ui.collapsing(tr!("settings.shortcuts"), |ui| {
-            egui::Grid::new("shortcuts").num_columns(2).spacing(vec2(16.0, 4.0)).show(ui, |ui| {
-                for (k, what) in [
-                    (tr!("key.space_k"), tr!("shortcut.toggle")),
-                    ("← / →  (J / L)", tr!("shortcut.seek")),
-                    ("Ctrl+← / Ctrl+→", tr!("shortcut.prev_next")),
-                    ("↑ / ↓", tr!("shortcut.volume")),
-                    ("M", tr!("shortcut.mute")),
-                    ("S / R", tr!("shortcut.shuffle_repeat")),
-                    (tr!("key.ctrl_f_slash"), tr!("shortcut.search")),
-                    (tr!("shortcut.media_keys"), tr!("shortcut.media_keys_note")),
-                ] {
-                    ui.label(RichText::new(k).strong());
-                    ui.label(RichText::new(what).color(DIM));
-                    ui.end_row();
-                }
-            });
-        });
-        if changed {
-            self.save_prefs();
         }
     }
 
@@ -1401,8 +1351,18 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_messages(ctx);
 
+        // O automix comecou a proxima sozinho: a fila so acompanha.
+        let mut st = self.player.snapshot();
+        if st.advanced {
+            self.player.state.lock().unwrap().advanced = false;
+            if let Some(current) = st.current.clone() {
+                self.follow_crossfade(&current);
+            }
+            st.advanced = false;
+        }
+        self.sync_next_track();
+
         // Avanca a fila quando a faixa termina (ou falha).
-        let st = self.player.snapshot();
         if st.finished {
             self.player.state.lock().unwrap().finished = false;
             if let Status::Error(msg) = &st.status {
@@ -1614,12 +1574,6 @@ fn page_header(ui: &mut egui::Ui, title: &str, sub: &str, wide: bool, show_play:
     });
     ui.add_space(12.0);
     play
-}
-
-/// Titulo pequeno de secao nas janelas de ajustes.
-fn section_label(ui: &mut egui::Ui, text: &str) {
-    ui.label(RichText::new(text).strong());
-    ui.add_space(2.0);
 }
 
 fn empty_state(ui: &mut egui::Ui, title: &str, sub: &str) {
@@ -2055,7 +2009,41 @@ fn setup_fonts(ctx: &egui::Context, cjk: (bool, bool)) {
 
 #[cfg(test)]
 mod tests {
-    use super::shuffle_in_place;
+    use super::{Repeat, crossfade_target, queue_index_of, shuffle_in_place};
+    use crate::ytm::Track;
+
+    fn queue(ids: &[&str]) -> Vec<Track> {
+        ids.iter().map(|id| Track { video_id: id.to_string(), ..Default::default() }).collect()
+    }
+
+    fn id(t: Option<&Track>) -> Option<&str> {
+        t.map(|t| t.video_id.as_str())
+    }
+
+    #[test]
+    fn crossfade_target_follows_queue_and_repeat_rules() {
+        let q = queue(&["a", "b", "c"]);
+        assert_eq!(id(crossfade_target(&q, 0, Repeat::Off)), Some("b"));
+        assert_eq!(id(crossfade_target(&q, 1, Repeat::All)), Some("c"));
+        // Fim da fila: sem repeticao nao ha o que mesclar; repetir fila volta ao inicio.
+        assert_eq!(id(crossfade_target(&q, 2, Repeat::Off)), None);
+        assert_eq!(id(crossfade_target(&q, 2, Repeat::All)), Some("a"));
+        // Repetir faixa: nunca mescla; fila de uma faixa so com repetir fila tambem nao.
+        assert_eq!(id(crossfade_target(&q, 0, Repeat::One)), None);
+        assert_eq!(id(crossfade_target(&queue(&["a"]), 0, Repeat::All)), None);
+        assert_eq!(id(crossfade_target(&[], 0, Repeat::Off)), None);
+    }
+
+    #[test]
+    fn queue_follows_the_track_the_automix_started() {
+        let q = queue(&["a", "b", "c"]);
+        assert_eq!(queue_index_of(&q, 0, "b"), Some(1));
+        assert_eq!(queue_index_of(&q, 2, "a"), Some(0)); // volta ao inicio (repetir fila)
+        // Faixa repetida na fila: pega a proxima ocorrencia depois da atual, nao a primeira.
+        let dup = queue(&["a", "b", "a", "c"]);
+        assert_eq!(queue_index_of(&dup, 1, "a"), Some(2));
+        assert_eq!(queue_index_of(&q, 0, "zzz"), None);
+    }
 
     #[test]
     fn shuffle_keeps_all_items() {
