@@ -25,7 +25,7 @@ Um app nativo, em um único `.exe` de poucos MB, com o visual do YouTube Music e
 - **Leve**: interface em [egui](https://github.com/emilk/egui) com renderização por GPU, áudio decodificado em Rust puro. Sem `mpv` nem `ffmpeg`.
 - **Próxima faixa já pronta**: o app baixa a próxima música da fila enquanto a atual toca, então a troca é imediata.
 - **Teclas de mídia**: play/pause, próxima e anterior do teclado e do fone, com o painel de mídia do Windows (capa e título), mesmo minimizado.
-- **Mini-player flutuante**: ao minimizar, um mini-player de vidro fica sobre todas as janelas. Dois formatos (completo, com aleatório/repetir/Mix, e compacto, só com os controles), arrastável, com botão de travar, esconder e fechar que aparecem no hover.
+- **Mini-player flutuante**: pelo botão de mini-player na barra superior, a janela principal é minimizada e um mini-player de vidro fica sobre todas as janelas (minimizar pelo Windows continua só minimizando). Dois formatos (completo, com aleatório/repetir/Mix, e compacto, só com os controles), arrastável, com botão de travar, esconder e fechar que aparecem no hover.
 - **A seguir / Relacionadas**: painel à direita com a fila e as sugestões da música atual.
 - **Playlists no menu**: clique em Playlists para listar todas no menu lateral; arraste uma música para uma delas para adicioná-la.
 - **Atalhos de teclado**: Espaço, ←/→, Ctrl+←/→, ↑/↓, M, S, R, Ctrl+F (lista completa na engrenagem).

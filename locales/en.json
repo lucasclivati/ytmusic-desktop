@@ -64,7 +64,6 @@
   "settings.language": "Language",
   "settings.playback": "Playback",
   "settings.interface": "Interface",
-  "settings.mini_on_minimize": "Floating mini-player when minimized",
   "settings.mini_pinned": "Lock the mini-player in place",
   "settings.show_queue": "“Up next” panel on the right",
   "settings.shortcuts": "Keyboard shortcuts",
@@ -106,6 +105,7 @@
 
   "mini.try_next": "Try the next one",
   "mini.downloading": "Downloading…",
+  "mini.open": "Open mini-player",
   "mini.close": "Close and go back to the app",
   "mini.hide": "Hide mini-player",
   "mini.unpin": "Unlock (allows dragging)",

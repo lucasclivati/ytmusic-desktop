@@ -510,8 +510,8 @@ impl App {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 12.0;
             logo(ui, wide);
-            // Direita: [spinner] [engrenagem] [avatar].
-            let right_w = 34.0 * 2.0 + 24.0 + ui.spacing().item_spacing.x * 3.0;
+            // Direita: [spinner] [mini-player] [engrenagem] [avatar].
+            let right_w = 34.0 * 3.0 + 24.0 + ui.spacing().item_spacing.x * 4.0;
             let avail = (ui.available_width() - right_w).max(120.0);
             let search_w = avail.min(560.0);
             ui.add_space(((avail - search_w) / 2.0).max(0.0));
@@ -519,6 +519,7 @@ impl App {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 self.avatar(ui);
                 self.gear(ui);
+                self.mini_button(ui);
                 if self.loading {
                     ui.spinner();
                 }
@@ -562,6 +563,31 @@ impl App {
                 }
             });
         });
+    }
+
+    /// Botao "mini-player": minimiza a janela principal e abre o mini-player flutuante.
+    fn mini_button(&mut self, ui: &mut egui::Ui) {
+        let (rect, resp) = ui.allocate_exact_size(Vec2::splat(34.0), Sense::click());
+        let c = rect.center();
+        if resp.hovered() {
+            ui.painter().circle_filled(c, 17.0, Color32::from_white_alpha(22));
+        }
+        let color = if resp.hovered() { Color32::WHITE } else { Color32::from_gray(210) };
+        let p = ui.painter();
+        // Janela grande com uma janelinha preenchida no canto inferior direito.
+        let outer = Rect::from_center_size(c, vec2(18.0, 14.0));
+        p.rect_stroke(outer, 2.0, Stroke::new(1.8, color), egui::StrokeKind::Middle);
+        let inner = Rect::from_min_max(outer.center() + vec2(0.5, 0.5), outer.max - vec2(2.5, 2.5));
+        p.rect_filled(inner, 1.0, color);
+        if resp.on_hover_text(tr!("mini.open")).clicked() {
+            self.open_mini(&ui.ctx().clone());
+        }
+    }
+
+    fn open_mini(&mut self, ctx: &egui::Context) {
+        self.mini_visible = true;
+        self.mini_glass = false;
+        ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Minimized(true));
     }
 
     /// Engrenagem: abre as configuracoes do app (separadas da conta).
@@ -791,7 +817,6 @@ impl App {
 
         ui.add_space(10.0);
         section_label(ui, tr!("settings.playback"));
-        changed |= ui.checkbox(&mut self.prefs.mini_on_minimize, tr!("settings.mini_on_minimize")).changed();
         changed |= ui.checkbox(&mut self.prefs.mini_compact, tr!("settings.mini_compact")).changed();
         changed |= ui.checkbox(&mut self.prefs.mini_pinned, tr!("settings.mini_pinned")).changed();
         if self.ytdlp_ok {
@@ -1426,14 +1451,12 @@ impl eframe::App for App {
             }
         }
 
-        // Mini-player: abre ao minimizar (se a preferencia estiver ligada), fecha ao voltar.
+        // Mini-player: so abre pelo botao da barra superior (minimizar continua
+        // sendo so minimizar); fecha quando a janela principal volta.
         let minimized = ctx.input(|i| i.viewport().minimized).unwrap_or(false);
         if minimized != self.was_minimized {
             self.was_minimized = minimized;
-            if minimized && self.prefs.mini_on_minimize {
-                self.mini_visible = true;
-                self.mini_glass = false;
-            } else if !minimized && self.mini_visible {
+            if !minimized && self.mini_visible {
                 self.close_mini();
             }
         }

@@ -64,7 +64,6 @@
   "settings.language": "Idioma",
   "settings.playback": "Reprodução",
   "settings.interface": "Interface",
-  "settings.mini_on_minimize": "Mini-player flutuante ao minimizar",
   "settings.mini_pinned": "Travar o mini-player na tela",
   "settings.show_queue": "Painel “A seguir” à direita",
   "settings.shortcuts": "Atalhos de teclado",
@@ -106,6 +105,7 @@
 
   "mini.try_next": "Tente a próxima",
   "mini.downloading": "Baixando…",
+  "mini.open": "Abrir mini-player",
   "mini.close": "Fechar e voltar ao app",
   "mini.hide": "Esconder mini-player",
   "mini.unpin": "Destravar (permite arrastar)",
