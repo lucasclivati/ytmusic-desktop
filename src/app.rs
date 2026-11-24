@@ -3,7 +3,8 @@
 
 use crate::auth::Auth;
 use crate::mini::{self, MiniAction};
-use crate::player::{Player, Status, find_ytdlp};
+use crate::deps::{self, Component};
+use crate::player::{Player, Status};
 use crate::prefs::Prefs;
 use crate::tr;
 use crate::updater;
@@ -54,6 +55,9 @@ enum Msg {
     Mix(String, Result<Vec<Track>, String>),
     Account(Option<String>),
     Login(Result<Auth, String>),
+    /// Progresso do download de um componente (yt-dlp / Deno).
+    DepsProgress(Component, u64, u64),
+    DepsDone(Result<(), String>),
     Related(String, Result<Vec<Track>, String>),
     AddedToPlaylist(Playlist, Result<(), String>),
     /// Resultado de "Verificar atualizacoes" (None = ja esta na versao mais recente).
@@ -99,7 +103,9 @@ pub struct App {
     update_state: update::UpdateState,
     cookie_input: String,
     account_name: Option<String>,
-    ytdlp_ok: bool,
+    /// Componentes que faltam para tocar (yt-dlp, runtime JS).
+    missing: deps::Missing,
+    deps_job: DepsJob,
     #[cfg(windows)]
     taskbar: Option<crate::taskbar::Taskbar>,
     #[cfg(windows)]
@@ -171,6 +177,14 @@ fn queue_index_of(queue: &[Track], qi: usize, id: &str) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
+/// Download dos componentes pelo app (botao "Baixar e instalar").
+#[derive(Clone, PartialEq)]
+enum DepsJob {
+    Idle,
+    Working(Component, u64, u64),
+    Failed(String),
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Repeat {
     Off,
@@ -217,7 +231,8 @@ impl App {
             update_state: update::UpdateState::Idle,
             cookie_input: String::new(),
             account_name: None,
-            ytdlp_ok: find_ytdlp().is_some(),
+            missing: deps::missing(),
+            deps_job: DepsJob::Idle,
             #[cfg(windows)]
             taskbar: init_taskbar(cc),
             #[cfg(windows)]
@@ -453,6 +468,18 @@ impl App {
                     }
                     Err(e) => self.notice = Some(e),
                 },
+                Msg::DepsProgress(c, done, total) => self.deps_job = DepsJob::Working(c, done, total),
+                Msg::DepsDone(result) => {
+                    self.missing = deps::missing();
+                    match result {
+                        Ok(()) => {
+                            self.deps_job = DepsJob::Idle;
+                            self.notice = None;
+                            self.toast = Some((tr!("deps.done").to_string(), Instant::now()));
+                        }
+                        Err(e) => self.deps_job = DepsJob::Failed(e),
+                    }
+                }
                 Msg::UpdateChecked(result) => self.update_checked(result),
                 Msg::UpdateProgress(done, total) => self.update_progress(done, total),
                 Msg::UpdateDownloaded(result) => self.update_downloaded(result),
@@ -952,6 +979,75 @@ impl App {
         });
     }
 
+    /// Baixa o que falta (yt-dlp / Deno) em segundo plano. So roda pelo botao.
+    fn install_deps(&mut self, ctx: &egui::Context) {
+        if matches!(self.deps_job, DepsJob::Working(..)) {
+            return;
+        }
+        let first = if self.missing.ytdlp { Component::YtDlp } else { Component::Deno };
+        self.deps_job = DepsJob::Working(first, 0, 0);
+        let (tx, ctx) = (self.tx.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let (ptx, pctx) = (tx.clone(), ctx.clone());
+            let result = deps::install_missing(move |c, done, total| {
+                let _ = ptx.send(Msg::DepsProgress(c, done, total));
+                pctx.request_repaint();
+            });
+            let _ = tx.send(Msg::DepsDone(result));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Botao "Baixar e instalar" / barra de progresso / erro do download de componentes.
+    pub(super) fn deps_controls(&mut self, ui: &mut egui::Ui) {
+        match self.deps_job.clone() {
+            DepsJob::Working(c, done, total) => {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(tr!("deps.downloading", name = c.label())).color(Color32::from_gray(230)));
+                    let f = if total > 0 { (done as f32 / total as f32).clamp(0.0, 1.0) } else { 0.0 };
+                    ui.add(egui::ProgressBar::new(f).desired_width(220.0).fill(ACCENT).show_percentage());
+                });
+            }
+            DepsJob::Failed(_) => {
+                if pill_button(ui, tr!("deps.retry"), true).clicked() {
+                    self.install_deps(&ui.ctx().clone());
+                }
+            }
+            DepsJob::Idle => {
+                if pill_button(ui, tr!("deps.install"), true).clicked() {
+                    self.install_deps(&ui.ctx().clone());
+                }
+            }
+        }
+    }
+
+    /// Aviso no topo enquanto faltar algum componente para tocar.
+    fn deps_bar(&mut self, ui: &mut egui::Ui) {
+        if !self.missing.any() && !matches!(self.deps_job, DepsJob::Working(..)) {
+            return;
+        }
+        let text = match (self.missing.ytdlp, self.missing.js_runtime) {
+            (true, true) => tr!("deps.need_ytdlp_js"),
+            (true, false) => tr!("deps.need_ytdlp"),
+            _ => tr!("deps.need_js"),
+        };
+        egui::Frame::new().fill(Color32::from_rgb(0x2e, 0x16, 0x16)).corner_radius(8.0).inner_margin(Margin::symmetric(14, 10)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_max_width((ui.available_width() - 250.0).max(200.0));
+                    ui.add(egui::Label::new(RichText::new(text).strong().color(Color32::from_rgb(0xff, 0xc4, 0xbe))).wrap());
+                    ui.label(RichText::new(tr!("deps.source_note")).color(DIM).small());
+                    if let DepsJob::Failed(e) = &self.deps_job {
+                        ui.add(egui::Label::new(RichText::new(tr!("deps.failed", error = e)).color(Color32::from_rgb(0xff, 0x9a, 0x92)).small()).wrap());
+                    }
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| self.deps_controls(ui));
+            });
+        });
+        ui.add_space(6.0);
+    }
+
     fn notice_bar(&mut self, ui: &mut egui::Ui) {
         let Some(n) = self.notice.clone() else { return };
         egui::Frame::new().fill(Color32::from_rgb(0x2e, 0x16, 0x16)).corner_radius(8.0).inner_margin(Margin::symmetric(12, 8)).show(ui, |ui| {
@@ -1366,10 +1462,17 @@ impl eframe::App for App {
         if st.finished {
             self.player.state.lock().unwrap().finished = false;
             if let Status::Error(msg) = &st.status {
-                self.consecutive_errors += 1;
-                self.notice = Some(msg.clone());
-                if self.consecutive_errors < 3 {
-                    self.next(ctx);
+                self.missing = deps::missing();
+                if self.missing.ytdlp {
+                    // Sem o yt-dlp nenhuma faixa toca: nao pula a fila; o aviso de
+                    // componentes (com o botao de instalar) ja explica.
+                    self.consecutive_errors = 0;
+                } else {
+                    self.consecutive_errors += 1;
+                    self.notice = Some(msg.clone());
+                    if self.consecutive_errors < 3 {
+                        self.next(ctx);
+                    }
                 }
             } else {
                 self.consecutive_errors = 0;
@@ -1488,6 +1591,7 @@ impl eframe::App for App {
         }
         let content_margin = Margin::symmetric(if wide { 24 } else { 12 }, 0);
         egui::CentralPanel::default().frame(egui::Frame::new().fill(BG).inner_margin(content_margin)).show(ui, |ui| {
+            self.deps_bar(ui);
             self.notice_bar(ui);
             self.content(ui, wide);
         });

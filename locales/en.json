@@ -67,8 +67,6 @@
   "settings.mini_pinned": "Lock the mini-player in place",
   "settings.show_queue": "“Up next” panel on the right",
   "settings.shortcuts": "Keyboard shortcuts",
-  "settings.ytdlp_missing": "yt-dlp not found. Install it: winget install yt-dlp.yt-dlp",
-  "settings.ytdlp_ok": "yt-dlp found",
 
   "shortcut.toggle": "Play / pause",
   "shortcut.seek": "Back / forward 10 s",
@@ -101,7 +99,7 @@
   "player.search_hint": "Search for a song",
   "player.cannot_play": "Couldn't play this song",
   "player.downloading": "Downloading… it'll start in a moment",
-  "player.ytdlp_missing": "yt-dlp not found. Install it with: winget install yt-dlp.yt-dlp",
+  "player.ytdlp_missing": "yt-dlp not found. Use the “Download and install” button in the notice at the top.",
 
   "mini.try_next": "Try the next one",
   "mini.downloading": "Downloading…",
@@ -141,10 +139,21 @@
   "update.installing": "Installing... the app will close and reopen.",
   "general.components": "Components",
   "general.ytdlp_desc": "Downloads the songs' audio",
-  "general.ytdlp_install": "Install with: winget install yt-dlp.yt-dlp",
   "general.found": "Found",
   "general.not_found": "Not found",
   "general.about": "About",
   "general.version": "Version {version}",
-  "general.repository": "Repository"
+  "general.repository": "Repository",
+
+  "deps.need_ytdlp_js": "To play music, the app needs yt-dlp and Deno (about 65 MB).",
+  "deps.need_ytdlp": "To play music, the app needs yt-dlp (about 25 MB).",
+  "deps.need_js": "To play music, yt-dlp needs Deno (about 43 MB).",
+  "deps.source_note": "Downloaded from the official GitHub Releases, with the SHA-256 verified.",
+  "deps.install": "Download and install",
+  "deps.retry": "Try again",
+  "deps.downloading": "Downloading {name}…",
+  "deps.done": "Components installed. You can play music now.",
+  "deps.failed": "Couldn't install: {error}",
+  "general.js_runtime": "JavaScript runtime",
+  "general.js_desc": "Used by yt-dlp for YouTube (Deno or Node)"
 }

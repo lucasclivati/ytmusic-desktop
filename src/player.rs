@@ -419,9 +419,11 @@ pub fn find_ytdlp() -> Option<PathBuf> {
     which("yt-dlp")
 }
 
-/// Argumento `--js-runtimes` para o yt-dlp: Deno (inclusive o do winget) ou Node.
-fn js_runtime_arg() -> Option<String> {
-    if let Some(p) = which("deno").or_else(|| winget_package_exe("DenoLand.Deno_", "deno.exe")) {
+/// Argumento `--js-runtimes` para o yt-dlp: Deno (o baixado pelo app, o do PATH ou o
+/// do winget) ou Node.
+pub(crate) fn js_runtime_arg() -> Option<String> {
+    let own = Some(util::data_dir().join("deno.exe")).filter(|p| p.is_file());
+    if let Some(p) = own.or_else(|| which("deno")).or_else(|| winget_package_exe("DenoLand.Deno_", "deno.exe")) {
         return Some(format!("deno:{}", p.display()));
     }
     which("node").map(|p| format!("node:{}", p.display()))

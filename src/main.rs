@@ -2,6 +2,7 @@
 
 mod app;
 mod auth;
+mod deps;
 mod i18n;
 mod media;
 mod mini;

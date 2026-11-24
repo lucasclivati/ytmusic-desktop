@@ -280,15 +280,25 @@ impl App {
 
         section_title(ui, tr!("general.components"));
         card(ui, |ui| {
-            let desc = if self.ytdlp_ok { tr!("general.ytdlp_desc") } else { tr!("general.ytdlp_install") };
-            row(ui, "yt-dlp", Some(desc), |ui| {
-                if self.ytdlp_ok {
+            let found = |ui: &mut egui::Ui, ok: bool| {
+                if ok {
                     ui.label(RichText::new(tr!("general.found")).color(DIM));
                 } else {
                     ui.colored_label(ACCENT, tr!("general.not_found"));
                 }
-            });
+            };
+            row(ui, "yt-dlp", Some(tr!("general.ytdlp_desc")), |ui| found(ui, !self.missing.ytdlp));
+            divider(ui);
+            row(ui, tr!("general.js_runtime"), Some(tr!("general.js_desc")), |ui| found(ui, !self.missing.js_runtime));
+            if self.missing.any() || matches!(self.deps_job, super::DepsJob::Working(..)) {
+                divider(ui);
+                row(ui, tr!("deps.install"), Some(tr!("deps.source_note")), |ui| self.deps_controls(ui));
+            }
         });
+        if let super::DepsJob::Failed(e) = &self.deps_job {
+            ui.add_space(6.0);
+            ui.add(egui::Label::new(RichText::new(tr!("deps.failed", error = e)).color(ACCENT).small()).wrap());
+        }
 
         section_title(ui, tr!("general.about"));
         card(ui, |ui| {
