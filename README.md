@@ -24,6 +24,12 @@ Um app nativo, em um único `.exe` de poucos MB, com o visual do YouTube Music e
 - **Responsivo**: em janelas estreitas o menu lateral vira abas e o player se reorganiza em duas linhas.
 - **Leve**: interface em [egui](https://github.com/emilk/egui) com renderização por GPU, áudio decodificado em Rust puro. Sem `mpv` nem `ffmpeg`.
 - **Próxima faixa já pronta**: o app baixa a próxima música da fila enquanto a atual toca, então a troca é imediata.
+- **Teclas de mídia**: play/pause, próxima e anterior do teclado e do fone, com o painel de mídia do Windows (capa e título), mesmo minimizado.
+- **Mini-player flutuante**: ao minimizar, um mini-player de vidro fica sobre todas as janelas. Dois formatos (completo, com aleatório/repetir/Mix, e compacto, só com os controles), arrastável, com botão de travar, esconder e fechar que aparecem no hover.
+- **A seguir / Relacionadas**: painel à direita com a fila e as sugestões da música atual.
+- **Playlists no menu**: clique em Playlists para listar todas no menu lateral; arraste uma música para uma delas para adicioná-la.
+- **Atalhos de teclado**: Espaço, ←/→, Ctrl+←/→, ↑/↓, M, S, R, Ctrl+F (lista completa na engrenagem).
+- **Português e inglês**: textos por chave em `locales/*.json` (segue o idioma do Windows; troque na engrenagem).
 
 ## Como o app é organizado
 
@@ -106,6 +112,7 @@ Tudo em `%LOCALAPPDATA%\ytmusic\`:
 | --- | --- |
 | `auth.bin` | cookies da sessão, protegidos pelo DPAPI |
 | `volume` | último volume usado |
+| `prefs.json` | preferências (idioma, mini-player, painel) |
 | `cache\` | áudios das últimas 80 faixas (cerca de 4 MB cada), limpo automaticamente |
 
 Para remover tudo, apague essa pasta.
@@ -127,6 +134,10 @@ Estrutura do código:
 | `src/player.rs` | reprodução: yt-dlp, cache, decodificação e controle de áudio (rodio) |
 | `src/auth.rs` | credenciais: cookie, `SAPISIDHASH` e proteção via DPAPI |
 | `src/bin/login.rs` | janela de login em WebView2 (executável separado) |
+| `src/mini.rs` | mini-player flutuante (vidro, dois formatos) |
+| `src/media.rs` | teclas de mídia e painel de mídia do Windows (SMTC) |
+| `src/i18n.rs` | traduções por chave (`tr!("chave")`), arquivos em `locales/` |
+| `src/prefs.rs` | preferências (`prefs.json`) |
 
 ## Stack
 
