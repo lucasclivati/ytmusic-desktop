@@ -21,6 +21,10 @@ Um app nativo, em um único `.exe` de poucos MB, com o visual do YouTube Music e
 
 `YTMusic-Setup-<versão>.exe` · instala só para o seu usuário, sem precisar de administrador
 
+<br>
+
+<img src="docs/screenshot.png" alt="YT Music: lista de músicas curtidas, com a barra do player embaixo" width="860">
+
 </div>
 
 ## Baixar e instalar
